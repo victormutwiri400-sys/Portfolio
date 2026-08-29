@@ -776,6 +776,3 @@ def internal_error(error):
     return response('error', 'Internal server error', None, 500)
 
 
-if __name__ == '__main__':
-    # Run Flask app
-    app.run(debug=True, host='0.0.0.0', port=5000)
