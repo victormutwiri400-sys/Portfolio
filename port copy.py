@@ -35,7 +35,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'mysql-victordesigner.alwaysdata.net'),
     'user': os.getenv('DB_USER', 'victordesigner'),
-    'password': os.getenv('DB_PASSWORD', 'project_1234'),
+    'password': os.getenv('DB_PASSWORD', '#####'),
     'database': os.getenv('DB_NAME', 'victordesigner_portifolio')
 }
 
