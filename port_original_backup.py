@@ -1,0 +1,1800 @@
+"""
+Portfolio Backend - Flask Application
+Handles profile, CV entries, certificates, and gallery photos.
+
+Image storage:
+    Cloudinary
+
+Database:
+    MySQL / MariaDB
+"""
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+
+import mysql.connector
+from mysql.connector import Error
+
+from dotenv import load_dotenv
+
+import cloudinary
+import cloudinary.uploader
+
+import os
+import re
+import base64
+import uuid
+from datetime import datetime
+
+
+# ============================================================================
+# ENVIRONMENT
+# ============================================================================
+
+load_dotenv()
+
+
+# ============================================================================
+# FLASK
+# ============================================================================
+
+app = Flask(__name__)
+
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
+CORS(
+    app,
+    resources={
+        r"/api/*": {"origins": "*"}
+    }
+)
+
+
+# ============================================================================
+# CLOUDINARY CONFIGURATION
+# ============================================================================
+
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+
+if (
+    CLOUDINARY_CLOUD_NAME
+    and CLOUDINARY_API_KEY
+    and CLOUDINARY_API_SECRET
+):
+    cloudinary.config(
+        cloud_name=CLOUDINARY_CLOUD_NAME,
+        api_key=CLOUDINARY_API_KEY,
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True,
+    )
+
+
+ALLOWED_EXTENSIONS = {
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+}
+
+
+# ============================================================================
+# DATABASE CONFIGURATION
+# ============================================================================
+
+DB_CONFIG = {
+    "host": os.getenv(
+        "DB_HOST",
+        "mysql-victordesigner.alwaysdata.net"
+    ),
+    "user": os.getenv(
+        "DB_USER",
+        "victordesigner"
+    ),
+    "password": os.getenv(
+        "DB_PASSWORD"
+    ),
+    "database": os.getenv(
+        "DB_NAME",
+        "victordesigner_portifolio"
+    ),
+}
+
+
+# ============================================================================
+# DATABASE CONNECTION
+# ============================================================================
+
+def get_db_connection():
+    """Create and return a MySQL database connection."""
+
+    try:
+        connection = mysql.connector.connect(**DB_CONFIG)
+        return connection
+
+    except Error as e:
+        print(f"Database connection error: {e}")
+        return None
+
+
+# ============================================================================
+# STANDARD RESPONSE
+# ============================================================================
+
+def response(status, message, data=None, status_code=200):
+    """Create a standardized JSON response."""
+
+    result = {
+        "status": status,
+        "message": message,
+    }
+
+    if data is not None:
+        result["data"] = data
+
+    return jsonify(result), status_code
+
+
+# ============================================================================
+# FILE HELPERS
+# ============================================================================
+
+def allowed_file(filename):
+    """Check whether the file extension is allowed."""
+
+    if not filename or "." not in filename:
+        return False
+
+    extension = filename.rsplit(".", 1)[1].lower()
+
+    return extension in ALLOWED_EXTENSIONS
+
+
+def cloudinary_ready():
+    """Check whether Cloudinary configuration exists."""
+
+    return bool(
+        CLOUDINARY_CLOUD_NAME
+        and CLOUDINARY_API_KEY
+        and CLOUDINARY_API_SECRET
+    )
+
+
+# ============================================================================
+# CLOUDINARY UPLOAD
+# ============================================================================
+
+def upload_to_cloudinary(file, folder="portfolio"):
+    """
+    Upload a Flask file directly to Cloudinary.
+
+    Returns:
+        {
+            "url": "...",
+            "public_id": "..."
+        }
+
+    or None if upload fails.
+    """
+
+    if not cloudinary_ready():
+        print("Cloudinary configuration is missing.")
+        return None
+
+    if not file or not file.filename:
+        return None
+
+    if not allowed_file(file.filename):
+        return None
+
+    try:
+        original_name = secure_filename(file.filename)
+
+        extension = ""
+
+        if "." in original_name:
+            extension = original_name.rsplit(".", 1)[1].lower()
+
+        unique_name = (
+            f"{datetime.now().strftime('%Y%m%d%H%M%S')}_"
+            f"{uuid.uuid4().hex[:10]}"
+        )
+
+        public_id = f"{folder}/{unique_name}"
+
+        result = cloudinary.uploader.upload(
+            file,
+            public_id=public_id,
+            resource_type="image",
+            overwrite=False,
+            use_filename=False,
+        )
+
+        return {
+            "url": result.get("secure_url"),
+            "public_id": result.get("public_id"),
+        }
+
+    except Exception as e:
+        print(f"Cloudinary upload error: {e}")
+        return None
+
+
+# ============================================================================
+# BASE64 IMAGE UPLOAD
+# ============================================================================
+
+def upload_base64_to_cloudinary(data, folder="portfolio"):
+    """
+    Upload a base64 image directly to Cloudinary.
+
+    Supports:
+        data:image/png;base64,...
+        data:image/jpeg;base64,...
+        etc.
+    """
+
+    if not cloudinary_ready():
+        print("Cloudinary configuration is missing.")
+        return None
+
+    if not data or not isinstance(data, str):
+        return None
+
+    data = data.strip()
+
+    if not data:
+        return None
+
+    try:
+        result = cloudinary.uploader.upload(
+            data,
+            folder=folder,
+            resource_type="image",
+        )
+
+        return {
+            "url": result.get("secure_url"),
+            "public_id": result.get("public_id"),
+        }
+
+    except Exception as e:
+        print(f"Cloudinary base64 upload error: {e}")
+        return None
+
+
+# ============================================================================
+# IMAGE UPLOAD HANDLER
+# ============================================================================
+
+def handle_image_upload(field_names, folder="portfolio"):
+    """
+    Find an image in the request and upload it to Cloudinary.
+
+    Priority:
+        1. Multipart file
+        2. Base64 form field
+        3. Base64 JSON field
+
+    Returns:
+        (image_data, error_message)
+
+    image_data:
+        {
+            "url": "...",
+            "public_id": "..."
+        }
+    """
+
+    if not cloudinary_ready():
+        return (
+            None,
+            "Cloudinary is not configured. "
+            "Please add CLOUDINARY_CLOUD_NAME, "
+            "CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET."
+        )
+
+    print(
+        f"[upload] files={list(request.files.keys())} "
+        f"fields={list(request.form.keys())}"
+    )
+
+    all_keys = (
+        "image",
+        "image_base64",
+        "image_url",
+        "imageUrl",
+        "photo",
+        "file",
+        "certificate",
+        "profile_image",
+        "gallery_photo",
+    )
+
+    file_keys = tuple(field_names) + all_keys
+
+    # ------------------------------------------------------------------------
+    # 1. MULTIPART FILE
+    # ------------------------------------------------------------------------
+
+    for name in file_keys:
+
+        file = request.files.get(name)
+
+        if file and file.filename:
+
+            if not allowed_file(file.filename):
+                return (
+                    None,
+                    "Invalid file type. Allowed: "
+                    "png, jpg, jpeg, gif, webp"
+                )
+
+            uploaded = upload_to_cloudinary(
+                file,
+                folder=folder
+            )
+
+            if not uploaded:
+                return (
+                    None,
+                    "Unable to upload image to Cloudinary."
+                )
+
+            return uploaded, None
+
+    # ------------------------------------------------------------------------
+    # 2. BASE64 FROM FORM
+    # ------------------------------------------------------------------------
+
+    for key in all_keys:
+
+        value = request.form.get(key, "").strip()
+
+        if not value:
+            continue
+
+        if value.startswith(("http://", "https://")):
+            return (
+                None,
+                "Image URLs are not accepted here. "
+                "Please upload an image file."
+            )
+
+        uploaded = upload_base64_to_cloudinary(
+            value,
+            folder=folder
+        )
+
+        if not uploaded:
+            return (
+                None,
+                f'Invalid image data in "{key}".'
+            )
+
+        return uploaded, None
+
+    # ------------------------------------------------------------------------
+    # 3. BASE64 FROM JSON
+    # ------------------------------------------------------------------------
+
+    if request.is_json:
+
+        data = request.get_json(silent=True) or {}
+
+        for key in all_keys:
+
+            value = data.get(key)
+
+            if not value:
+                continue
+
+            if not isinstance(value, str):
+                continue
+
+            value = value.strip()
+
+            if not value:
+                continue
+
+            if value.startswith(("http://", "https://")):
+                return (
+                    None,
+                    "Image URLs are not accepted here. "
+                    "Please upload an image file."
+                )
+
+            uploaded = upload_base64_to_cloudinary(
+                value,
+                folder=folder
+            )
+
+            if not uploaded:
+                return (
+                    None,
+                    f'Invalid image data in "{key}".'
+                )
+
+            return uploaded, None
+
+    return None, None
+
+
+# ============================================================================
+# PROFILE ROUTES
+# ============================================================================
+
+@app.route("/api/profile", methods=["GET"])
+def get_profile():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor(dictionary=True)
+
+        cursor.execute(
+            "SELECT * FROM profile LIMIT 1"
+        )
+
+        profile = cursor.fetchone()
+
+        cursor.close()
+        connection.close()
+
+        if profile:
+
+            # Cloudinary URL is already complete.
+            return response(
+                "success",
+                "Profile retrieved",
+                profile
+            )
+
+        return response(
+            "error",
+            "Profile not found",
+            None,
+            404
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/profile", methods=["POST", "PUT"])
+def create_or_update_profile():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        name = request.form.get(
+            "name",
+            ""
+        ).strip()
+
+        title = request.form.get(
+            "title",
+            ""
+        ).strip()
+
+        bio = request.form.get(
+            "bio",
+            ""
+        ).strip()
+
+        if not name or not title:
+            return response(
+                "error",
+                "Name and title are required",
+                None,
+                400
+            )
+
+        # ------------------------------------------------------------
+        # PROFILE IMAGE
+        # ------------------------------------------------------------
+
+        image_data, upload_error = handle_image_upload(
+            (
+                "profile_image",
+                "image",
+                "photo",
+                "file",
+            ),
+            folder="portfolio/profile"
+        )
+
+        if upload_error:
+            return response(
+                "error",
+                upload_error,
+                None,
+                400
+            )
+
+        profile_image = (
+            image_data["url"]
+            if image_data
+            else None
+        )
+
+        cursor = connection.cursor(dictionary=True)
+
+        cursor.execute(
+            "SELECT id FROM profile LIMIT 1"
+        )
+
+        existing = cursor.fetchone()
+
+        if existing:
+
+            if profile_image:
+
+                cursor.execute(
+                    """
+                    UPDATE profile
+                    SET
+                        name=%s,
+                        title=%s,
+                        bio=%s,
+                        profile_image=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        name,
+                        title,
+                        bio,
+                        profile_image,
+                        existing["id"],
+                    )
+                )
+
+            else:
+
+                cursor.execute(
+                    """
+                    UPDATE profile
+                    SET
+                        name=%s,
+                        title=%s,
+                        bio=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        name,
+                        title,
+                        bio,
+                        existing["id"],
+                    )
+                )
+
+            connection.commit()
+
+            cursor.close()
+            connection.close()
+
+            return response(
+                "success",
+                "Profile updated successfully"
+            )
+
+        else:
+
+            cursor.execute(
+                """
+                INSERT INTO profile
+                (name, title, bio, profile_image)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    name,
+                    title,
+                    bio,
+                    profile_image,
+                )
+            )
+
+            connection.commit()
+
+            profile_id = cursor.lastrowid
+
+            cursor.close()
+            connection.close()
+
+            return response(
+                "success",
+                "Profile created successfully",
+                {"id": profile_id},
+                201
+            )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+# ============================================================================
+# CV ENTRIES
+# ============================================================================
+
+@app.route("/api/cv-entries", methods=["GET"])
+def get_cv_entries():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        section_type = request.args.get(
+            "section_type"
+        )
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        if section_type and section_type in [
+            "education",
+            "experience",
+            "skill",
+        ]:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM cv_entries
+                WHERE section_type=%s
+                ORDER BY id DESC
+                """,
+                (section_type,)
+            )
+
+        else:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM cv_entries
+                ORDER BY id DESC
+                """
+            )
+
+        entries = cursor.fetchall()
+
+        cursor.close()
+        connection.close()
+
+        return response(
+            "success",
+            "CV entries retrieved",
+            entries
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/cv-entries", methods=["POST"])
+def create_cv_entry():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        section_type = data.get(
+            "section_type",
+            ""
+        ).strip()
+
+        title = data.get(
+            "title",
+            ""
+        ).strip()
+
+        organization = data.get(
+            "organization",
+            ""
+        ).strip()
+
+        duration = data.get(
+            "duration",
+            ""
+        ).strip()
+
+        description = data.get(
+            "description",
+            ""
+        ).strip()
+
+        if section_type not in [
+            "education",
+            "experience",
+            "skill",
+        ]:
+
+            return response(
+                "error",
+                "Invalid section_type. "
+                "Must be education, experience, or skill",
+                None,
+                400
+            )
+
+        if not title:
+
+            return response(
+                "error",
+                "Title is required",
+                None,
+                400
+            )
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO cv_entries
+            (
+                section_type,
+                title,
+                organization,
+                duration,
+                description
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                section_type,
+                title,
+                organization,
+                duration,
+                description,
+            )
+        )
+
+        connection.commit()
+
+        entry_id = cursor.lastrowid
+
+        cursor.close()
+        connection.close()
+
+        return response(
+            "success",
+            "CV entry created successfully",
+            {"id": entry_id},
+            201
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+@app.route("/api/cv-entries/<int:entry_id>", methods=["GET"])
+def get_cv_entry(entry_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM cv_entries
+            WHERE id=%s
+            """,
+            (entry_id,)
+        )
+
+        entry = cursor.fetchone()
+
+        cursor.close()
+        connection.close()
+
+        if entry:
+
+            return response(
+                "success",
+                "CV entry retrieved",
+                entry
+            )
+
+        return response(
+            "error",
+            "CV entry not found",
+            None,
+            404
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/cv-entries/<int:entry_id>", methods=["PUT"])
+def update_cv_entry(entry_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        section_type = data.get(
+            "section_type",
+            ""
+        ).strip()
+
+        title = data.get(
+            "title",
+            ""
+        ).strip()
+
+        organization = data.get(
+            "organization",
+            ""
+        ).strip()
+
+        duration = data.get(
+            "duration",
+            ""
+        ).strip()
+
+        description = data.get(
+            "description",
+            ""
+        ).strip()
+
+        if section_type and section_type not in [
+            "education",
+            "experience",
+            "skill",
+        ]:
+
+            return response(
+                "error",
+                "Invalid section_type",
+                None,
+                400
+            )
+
+        if not title:
+
+            return response(
+                "error",
+                "Title is required",
+                None,
+                400
+            )
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            UPDATE cv_entries
+            SET
+                section_type=%s,
+                title=%s,
+                organization=%s,
+                duration=%s,
+                description=%s
+            WHERE id=%s
+            """,
+            (
+                section_type,
+                title,
+                organization,
+                duration,
+                description,
+                entry_id,
+            )
+        )
+
+        connection.commit()
+
+        if cursor.rowcount == 0:
+
+            cursor.close()
+
+            return response(
+                "error",
+                "CV entry not found",
+                None,
+                404
+            )
+
+        cursor.close()
+
+        return response(
+            "success",
+            "CV entry updated successfully"
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+@app.route("/api/cv-entries/<int:entry_id>", methods=["DELETE"])
+def delete_cv_entry(entry_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            DELETE FROM cv_entries
+            WHERE id=%s
+            """,
+            (entry_id,)
+        )
+
+        connection.commit()
+
+        if cursor.rowcount == 0:
+
+            cursor.close()
+
+            return response(
+                "error",
+                "CV entry not found",
+                None,
+                404
+            )
+
+        cursor.close()
+
+        return response(
+            "success",
+            "CV entry deleted successfully"
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+# ============================================================================
+# CERTIFICATES
+# ============================================================================
+
+@app.route("/api/certificates", methods=["GET"])
+def get_certificates():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM certificates
+            ORDER BY id DESC
+            """
+        )
+
+        certificates = cursor.fetchall()
+
+        cursor.close()
+        connection.close()
+
+        # image_url already contains Cloudinary URL
+        return response(
+            "success",
+            "Certificates retrieved",
+            certificates
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/certificates", methods=["POST"])
+def create_certificate():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        title = request.form.get(
+            "title",
+            ""
+        ).strip()
+
+        issuer = request.form.get(
+            "issuer",
+            ""
+        ).strip()
+
+        if not title:
+
+            return response(
+                "error",
+                "Title is required",
+                None,
+                400
+            )
+
+        image_data, upload_error = handle_image_upload(
+            (
+                "image",
+                "photo",
+                "file",
+                "certificate",
+            ),
+            folder="portfolio/certificates"
+        )
+
+        if upload_error:
+
+            return response(
+                "error",
+                upload_error,
+                None,
+                400
+            )
+
+        if not image_data:
+
+            return response(
+                "error",
+                "Certificate image is required.",
+                None,
+                400
+            )
+
+        image_url = image_data["url"]
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO certificates
+            (
+                title,
+                issuer,
+                image_url
+            )
+            VALUES (%s, %s, %s)
+            """,
+            (
+                title,
+                issuer,
+                image_url,
+            )
+        )
+
+        connection.commit()
+
+        certificate_id = cursor.lastrowid
+
+        cursor.close()
+        connection.close()
+
+        return response(
+            "success",
+            "Certificate created successfully",
+            {"id": certificate_id},
+            201
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+@app.route("/api/certificates/<int:cert_id>", methods=["GET"])
+def get_certificate(cert_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM certificates
+            WHERE id=%s
+            """,
+            (cert_id,)
+        )
+
+        certificate = cursor.fetchone()
+
+        cursor.close()
+        connection.close()
+
+        if certificate:
+
+            return response(
+                "success",
+                "Certificate retrieved",
+                certificate
+            )
+
+        return response(
+            "error",
+            "Certificate not found",
+            None,
+            404
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/certificates/<int:cert_id>", methods=["DELETE"])
+def delete_certificate(cert_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            DELETE FROM certificates
+            WHERE id=%s
+            """,
+            (cert_id,)
+        )
+
+        connection.commit()
+
+        if cursor.rowcount == 0:
+
+            cursor.close()
+
+            return response(
+                "error",
+                "Certificate not found",
+                None,
+                404
+            )
+
+        cursor.close()
+
+        return response(
+            "success",
+            "Certificate deleted successfully"
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+# ============================================================================
+# GALLERY
+# ============================================================================
+
+@app.route("/api/gallery", methods=["GET"])
+def get_gallery_photos():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM gallery_photos
+            ORDER BY id DESC
+            """
+        )
+
+        photos = cursor.fetchall()
+
+        cursor.close()
+        connection.close()
+
+        # image_url already contains Cloudinary URL
+        return response(
+            "success",
+            "Gallery photos retrieved",
+            photos
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/gallery", methods=["POST"])
+def create_gallery_photo():
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        caption = request.form.get(
+            "caption",
+            ""
+        ).strip()
+
+        image_data, upload_error = handle_image_upload(
+            (
+                "image",
+                "photo",
+                "file",
+                "gallery_photo",
+            ),
+            folder="portfolio/gallery"
+        )
+
+        if upload_error:
+
+            return response(
+                "error",
+                upload_error,
+                None,
+                400
+            )
+
+        if not image_data:
+
+            return response(
+                "error",
+                "Gallery image is required.",
+                None,
+                400
+            )
+
+        image_url = image_data["url"]
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO gallery_photos
+            (
+                caption,
+                image_url
+            )
+            VALUES (%s, %s)
+            """,
+            (
+                caption,
+                image_url,
+            )
+        )
+
+        connection.commit()
+
+        photo_id = cursor.lastrowid
+
+        cursor.close()
+        connection.close()
+
+        return response(
+            "success",
+            "Photo added to gallery successfully",
+            {"id": photo_id},
+            201
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+@app.route("/api/gallery/<int:photo_id>", methods=["GET"])
+def get_gallery_photo(photo_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM gallery_photos
+            WHERE id=%s
+            """,
+            (photo_id,)
+        )
+
+        photo = cursor.fetchone()
+
+        cursor.close()
+        connection.close()
+
+        if photo:
+
+            return response(
+                "success",
+                "Photo retrieved",
+                photo
+            )
+
+        return response(
+            "error",
+            "Photo not found",
+            None,
+            404
+        )
+
+    except Error as e:
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+
+@app.route("/api/gallery/<int:photo_id>", methods=["PUT"])
+def update_gallery_photo(photo_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        caption = data.get(
+            "caption",
+            ""
+        ).strip()
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            UPDATE gallery_photos
+            SET caption=%s
+            WHERE id=%s
+            """,
+            (
+                caption,
+                photo_id,
+            )
+        )
+
+        connection.commit()
+
+        if cursor.rowcount == 0:
+
+            cursor.close()
+
+            return response(
+                "error",
+                "Photo not found",
+                None,
+                404
+            )
+
+        cursor.close()
+
+        return response(
+            "success",
+            "Photo updated successfully"
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+@app.route("/api/gallery/<int:photo_id>", methods=["DELETE"])
+def delete_gallery_photo(photo_id):
+
+    connection = get_db_connection()
+
+    if not connection:
+        return response(
+            "error",
+            "Database connection failed",
+            None,
+            500
+        )
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            DELETE FROM gallery_photos
+            WHERE id=%s
+            """,
+            (photo_id,)
+        )
+
+        connection.commit()
+
+        if cursor.rowcount == 0:
+
+            cursor.close()
+
+            return response(
+                "error",
+                "Photo not found",
+                None,
+                404
+            )
+
+        cursor.close()
+
+        return response(
+            "success",
+            "Photo deleted successfully"
+        )
+
+    except Error as e:
+
+        connection.rollback()
+
+        return response(
+            "error",
+            f"Database error: {str(e)}",
+            None,
+            500
+        )
+
+    finally:
+
+        if connection and connection.is_connected():
+            connection.close()
+
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@app.route("/api/health", methods=["GET"])
+def health_check():
+
+    connection = get_db_connection()
+
+    if connection:
+
+        connection.close()
+
+        return response(
+            "success",
+            "Server and database are healthy"
+        )
+
+    return response(
+        "error",
+        "Database connection failed",
+        None,
+        500
+    )
+
+
+# ============================================================================
+# 404
+# ============================================================================
+
+@app.errorhandler(404)
+def not_found(error):
+
+    return response(
+        "error",
+        "Endpoint not found",
+        None,
+        404
+    )
+
+
+# ============================================================================
+# 500
+# ============================================================================
+
+@app.errorhandler(500)
+def internal_error(error):
+
+    return response(
+        "error",
+        "Internal server error",
+        None,
+        500
+    )
+
+
+# ============================================================================
+# LOCAL DEVELOPMENT
+# ============================================================================
+
+if __name__ == "__main__":
+
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.getenv(
+                "PORT",
+                5000
+            )
+        ),
+        debug=False
+    )
