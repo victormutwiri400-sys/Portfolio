@@ -36,7 +36,7 @@ DB_CONFIG = {
 
 # Secret admin token required for every mutating request (POST/PUT/DELETE).
 # Set a long, random value in your .env — never commit the real token.
-PORTFOLIO_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 
 def get_db_connection():
@@ -145,7 +145,7 @@ def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         provided = request.headers.get("X-Admin-Token", "")
-        if not PORTFOLIO_ADMIN_TOKEN or provided != PORTFOLIO_ADMIN_TOKEN:
+        if not ADMIN_TOKEN or provided != ADMIN_TOKEN:
             return response("error", "Unauthorized. A valid admin token is required.", None, 401)
         return f(*args, **kwargs)
 
@@ -374,7 +374,7 @@ def admin_login():
     """Validate a submitted admin token before the frontend unlocks controls."""
     data = request.get_json(silent=True) or {}
     provided = (data.get("token") or "").strip()
-    if PORTFOLIO_ADMIN_TOKEN and provided == PORTFOLIO_ADMIN_TOKEN:
+    if ADMIN_TOKEN and provided == ADMIN_TOKEN:
         return response("success", "Authenticated")
     return response("error", "Invalid admin token", None, 401)
 
