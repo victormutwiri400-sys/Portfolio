@@ -34,6 +34,10 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "victordesigner_portifolio"),
 }
 
+# Secret admin token required for every mutating request (POST/PUT/DELETE).
+# Set a long, random value in your .env — never commit the real token.
+PORTFOLIO_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
 
 def get_db_connection():
     try:
@@ -131,6 +135,23 @@ def with_db(f):
     return wrapper
 
 
+def admin_required(f):
+    """Reject any mutating request that does not carry the admin token.
+
+    Guards against direct POST/PUT/DELETE calls from the browser, curl, or
+    Postman even when the UI hides the management buttons.
+    """
+
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        provided = request.headers.get("X-Admin-Token", "")
+        if not PORTFOLIO_ADMIN_TOKEN or provided != PORTFOLIO_ADMIN_TOKEN:
+            return response("error", "Unauthorized. A valid admin token is required.", None, 401)
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
 @app.route("/api/profile", methods=["GET"])
 @with_db
 def get_profile(connection):
@@ -143,6 +164,7 @@ def get_profile(connection):
 
 
 @app.route("/api/profile", methods=["POST", "PUT"])
+@admin_required
 @with_db
 def create_or_update_profile(connection):
     name = request.form.get("name", "").strip()
@@ -180,6 +202,7 @@ def get_cv_entries(connection):
 
 
 @app.route("/api/cv-entries", methods=["POST"])
+@admin_required
 @with_db
 def create_cv_entry(connection):
     data = request.get_json(silent=True) or {}
@@ -209,6 +232,7 @@ def get_cv_entry(connection, entry_id):
 
 
 @app.route("/api/cv-entries/<int:entry_id>", methods=["PUT"])
+@admin_required
 @with_db
 def update_cv_entry(connection, entry_id):
     data = request.get_json(silent=True) or {}
@@ -229,6 +253,7 @@ def update_cv_entry(connection, entry_id):
 
 
 @app.route("/api/cv-entries/<int:entry_id>", methods=["DELETE"])
+@admin_required
 @with_db
 def delete_cv_entry(connection, entry_id):
     cursor = connection.cursor()
@@ -247,6 +272,7 @@ def get_certificates(connection):
 
 
 @app.route("/api/certificates", methods=["POST"])
+@admin_required
 @with_db
 def create_certificate(connection):
     title = request.form.get("title", "").strip()
@@ -275,6 +301,7 @@ def get_certificate(connection, cert_id):
 
 
 @app.route("/api/certificates/<int:cert_id>", methods=["DELETE"])
+@admin_required
 @with_db
 def delete_certificate(connection, cert_id):
     cursor = connection.cursor()
@@ -293,6 +320,7 @@ def get_gallery_photos(connection):
 
 
 @app.route("/api/gallery", methods=["POST"])
+@admin_required
 @with_db
 def create_gallery_photo(connection):
     caption = request.form.get("caption", "").strip()
@@ -318,6 +346,7 @@ def get_gallery_photo(connection, photo_id):
 
 
 @app.route("/api/gallery/<int:photo_id>", methods=["PUT"])
+@admin_required
 @with_db
 def update_gallery_photo(connection, photo_id):
     data = request.get_json(silent=True) or {}
@@ -330,6 +359,7 @@ def update_gallery_photo(connection, photo_id):
 
 
 @app.route("/api/gallery/<int:photo_id>", methods=["DELETE"])
+@admin_required
 @with_db
 def delete_gallery_photo(connection, photo_id):
     cursor = connection.cursor()
@@ -337,6 +367,16 @@ def delete_gallery_photo(connection, photo_id):
     if cursor.rowcount == 0:
         return response("error", "Photo not found", None, 404)
     return response("success", "Photo deleted successfully")
+
+
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
+    """Validate a submitted admin token before the frontend unlocks controls."""
+    data = request.get_json(silent=True) or {}
+    provided = (data.get("token") or "").strip()
+    if PORTFOLIO_ADMIN_TOKEN and provided == PORTFOLIO_ADMIN_TOKEN:
+        return response("success", "Authenticated")
+    return response("error", "Invalid admin token", None, 401)
 
 
 @app.route("/api/health", methods=["GET"])
