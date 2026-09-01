@@ -1,5 +1,6 @@
 """Portfolio Backend - Flask app with Cloudinary image storage and MySQL/MariaDB."""
 import os
+import secrets
 import uuid
 from datetime import datetime
 from functools import wraps
@@ -10,7 +11,7 @@ import mysql.connector
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from mysql.connector import Error
+from mysql.connector import Error, IntegrityError
 from werkzeug.utils import secure_filename
 
 load_dotenv()
@@ -367,6 +368,108 @@ def delete_gallery_photo(connection, photo_id):
     if cursor.rowcount == 0:
         return response("error", "Photo not found", None, 404)
     return response("success", "Photo deleted successfully")
+
+
+def share_link_status(row):
+    """Calculate the current status of a share link row."""
+    if not row.get("is_active"):
+        return "disabled"
+    expires_at = row.get("expires_at")
+    if expires_at and expires_at <= datetime.now():
+        return "expired"
+    return "active"
+
+
+def serialize_share_link(row):
+    """Format a portfolio_share_links row for API responses."""
+    return {
+        "id": row.get("id"),
+        "token": row.get("token"),
+        "expires_at": row["expires_at"].isoformat() if row.get("expires_at") else None,
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "is_active": bool(row.get("is_active")),
+        "status": share_link_status(row),
+        "share_path": "/share/{}".format(row.get("token")),
+    }
+
+
+@app.route("/api/share-links", methods=["POST"])
+@admin_required
+@with_db
+def create_share_link(connection):
+    data = request.get_json(silent=True) or {}
+    expires_at = (data.get("expires_at") or "").strip()
+    if not expires_at:
+        return response("error", "expires_at is required", None, 400)
+    try:
+        expiry = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return response("error", "Invalid expires_at format. Use YYYY-MM-DDTHH:MM:SS", None, 400)
+    if expiry <= datetime.now():
+        return response("error", "expires_at must be a future date", None, 400)
+    cursor = connection.cursor()
+    inserted = False
+    token = ""
+    for _ in range(5):
+        token = secrets.token_urlsafe(32)
+        try:
+            cursor.execute("INSERT INTO portfolio_share_links (token, expires_at, is_active) VALUES (%s, %s, TRUE)", (token, expiry.strftime("%Y-%m-%d %H:%M:%S")))
+            inserted = True
+            break
+        except IntegrityError:
+            continue
+    if not inserted:
+        return response("error", "Could not generate a unique share token", None, 500)
+    return response("success", "Share link created successfully", {
+        "id": cursor.lastrowid,
+        "token": token,
+        "expires_at": expiry.isoformat(),
+        "share_path": "/share/{}".format(token),
+    }, 201)
+
+
+@app.route("/api/share-links", methods=["GET"])
+@admin_required
+@with_db
+def get_share_links(connection):
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT id, token, expires_at, created_at, is_active FROM portfolio_share_links ORDER BY id DESC")
+    return response("success", "Share links retrieved", [serialize_share_link(row) for row in cursor.fetchall()])
+
+
+@app.route("/api/share-links/<token>", methods=["GET"])
+@with_db
+def validate_share_link(connection, token):
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT id, token, expires_at, is_active FROM portfolio_share_links WHERE token=%s", (token,))
+    row = cursor.fetchone()
+    if not row:
+        return response("error", "Share link not found", None, 404)
+    if not row.get("is_active"):
+        return response("error", "Share link has been disabled", None, 403)
+    if row.get("expires_at") and row["expires_at"] <= datetime.now():
+        return response("error", "Share link has expired", None, 410)
+    return response("success", "Share link is valid", {
+        "id": row.get("id"),
+        "token": row.get("token"),
+        "expires_at": row["expires_at"].isoformat() if row.get("expires_at") else None,
+        "status": "active",
+        "share_path": "/share/{}".format(row.get("token")),
+    })
+
+
+@app.route("/api/share-links/<int:share_id>", methods=["DELETE"])
+@admin_required
+@with_db
+def revoke_share_link(connection, share_id):
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT id, is_active FROM portfolio_share_links WHERE id=%s", (share_id,))
+    row = cursor.fetchone()
+    if not row:
+        return response("error", "Share link not found", None, 404)
+    if row.get("is_active"):
+        cursor.execute("UPDATE portfolio_share_links SET is_active = FALSE WHERE id=%s", (share_id,))
+    return response("success", "Share link revoked successfully")
 
 
 @app.route("/api/admin/login", methods=["POST"])
