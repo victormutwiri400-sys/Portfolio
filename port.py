@@ -39,6 +39,11 @@ DB_CONFIG = {
 # Set a long, random value in your .env — never commit the real token.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
+# Revoked share links are hard-deleted from the database once they have been
+# disabled AND expired for this many days. This keeps the table from growing
+# forever without needing a scheduled job (runs whenever the list is fetched).
+SHARE_LINK_RETENTION_DAYS = int(os.getenv("SHARE_LINK_RETENTION_DAYS", "30"))
+
 
 def get_db_connection():
     try:
@@ -445,6 +450,14 @@ def create_share_link(connection):
 @admin_required
 @with_db
 def get_share_links(connection):
+    cursor = connection.cursor()
+    # Auto-cleanup: permanently remove revoked links whose expiry passed more
+    # than SHARE_LINK_RETENTION_DAYS ago. expires_at is stored in UTC, so we
+    # compare against UTC_TIMESTAMP() for consistency.
+    cursor.execute(
+        "DELETE FROM portfolio_share_links WHERE is_active = FALSE AND expires_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY)",
+        (SHARE_LINK_RETENTION_DAYS,),
+    )
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT id, token, expires_at, created_at, is_active FROM portfolio_share_links ORDER BY id DESC")
     return response("success", "Share links retrieved", [serialize_share_link(row) for row in cursor.fetchall()])
@@ -483,6 +496,19 @@ def revoke_share_link(connection, share_id):
     if row.get("is_active"):
         cursor.execute("UPDATE portfolio_share_links SET is_active = FALSE WHERE id=%s", (share_id,))
     return response("success", "Share link revoked successfully")
+
+
+@app.route("/api/share-links/<int:share_id>/delete", methods=["DELETE"])
+@admin_required
+@with_db
+def delete_share_link(connection, share_id):
+    # Permanent removal — the row is gone from the database, so the URL will
+    # never work again (not even for an already-expired or disabled link).
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM portfolio_share_links WHERE id=%s", (share_id,))
+    if cursor.rowcount == 0:
+        return response("error", "Share link not found", None, 404)
+    return response("success", "Share link deleted successfully")
 
 
 @app.route("/api/admin/login", methods=["POST"])
