@@ -375,9 +375,19 @@ def share_link_status(row):
     if not row.get("is_active"):
         return "disabled"
     expires_at = row.get("expires_at")
-    if expires_at and expires_at <= datetime.now():
+    if expires_at and expires_at <= datetime.utcnow():
         return "expired"
     return "active"
+
+
+def _to_utc_iso(value):
+    """Format a DB datetime (stored as UTC) as an ISO string with a Z marker."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    value = str(value).replace(" ", "T")
+    return value if value.endswith("Z") else value + "Z"
 
 
 def serialize_share_link(row):
@@ -385,8 +395,8 @@ def serialize_share_link(row):
     return {
         "id": row.get("id"),
         "token": row.get("token"),
-        "expires_at": row["expires_at"].isoformat() if row.get("expires_at") else None,
-        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "expires_at": _to_utc_iso(row.get("expires_at")),
+        "created_at": _to_utc_iso(row.get("created_at")),
         "is_active": bool(row.get("is_active")),
         "status": share_link_status(row),
         "share_path": "/share/{}".format(row.get("token")),
@@ -402,10 +412,13 @@ def create_share_link(connection):
     if not expires_at:
         return response("error", "expires_at is required", None, 400)
     try:
-        expiry = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%S")
+        if expires_at.endswith("Z"):
+            expiry = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%SZ")
+        else:
+            expiry = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         return response("error", "Invalid expires_at format. Use YYYY-MM-DDTHH:MM:SS", None, 400)
-    if expiry <= datetime.now():
+    if expiry <= datetime.utcnow():
         return response("error", "expires_at must be a future date", None, 400)
     cursor = connection.cursor()
     inserted = False
@@ -423,7 +436,7 @@ def create_share_link(connection):
     return response("success", "Share link created successfully", {
         "id": cursor.lastrowid,
         "token": token,
-        "expires_at": expiry.isoformat(),
+        "expires_at": expiry.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "share_path": "/share/{}".format(token),
     }, 201)
 
@@ -447,12 +460,12 @@ def validate_share_link(connection, token):
         return response("error", "Share link not found", None, 404)
     if not row.get("is_active"):
         return response("error", "Share link has been disabled", None, 403)
-    if row.get("expires_at") and row["expires_at"] <= datetime.now():
+    if row.get("expires_at") and row["expires_at"] <= datetime.utcnow():
         return response("error", "Share link has expired", None, 410)
     return response("success", "Share link is valid", {
         "id": row.get("id"),
         "token": row.get("token"),
-        "expires_at": row["expires_at"].isoformat() if row.get("expires_at") else None,
+        "expires_at": _to_utc_iso(row.get("expires_at")),
         "status": "active",
         "share_path": "/share/{}".format(row.get("token")),
     })
