@@ -48,8 +48,6 @@ ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "pdf"}
 PROJECT_CATEGORIES = {
     "Full-Stack Development",
     "Web Applications",
-    "Graphic and Vector Design",
-    "Other Projects",
 }
 
 DB_CONFIG = {
