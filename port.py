@@ -1,5 +1,4 @@
 """Portfolio Backend - Flask app with Cloudinary image storage and MySQL/MariaDB."""
-import json
 import os
 import secrets
 import uuid
@@ -20,21 +19,7 @@ load_dotenv()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
-
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "my-portifolio-chi-dusky.vercel.app",
-]
-
-CORS(
-    app,
-    resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Admin-Token"],
-)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
@@ -43,12 +28,6 @@ if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
     cloudinary.config(cloud_name=CLOUDINARY_CLOUD_NAME, api_key=CLOUDINARY_API_KEY, api_secret=CLOUDINARY_API_SECRET, secure=True)
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "pdf"}
-
-# Project categories mirroring the frontend PROJECT_CATEGORIES list.
-PROJECT_CATEGORIES = {
-    "Full-Stack Development",
-    "Web Applications",
-}
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "mysql-victordesigner.alwaysdata.net"),
@@ -65,6 +44,12 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 # disabled AND expired for this many days. This keeps the table from growing
 # forever without needing a scheduled job (runs whenever the list is fetched).
 SHARE_LINK_RETENTION_DAYS = int(os.getenv("SHARE_LINK_RETENTION_DAYS", "30"))
+PROJECT_CATEGORIES = {
+    "Full-Stack Development",
+    "Web Applications",
+    "Graphic and Vector Design",
+    "Other Projects",
+}
 
 
 def get_db_connection():
@@ -84,37 +69,6 @@ def response(status, message, data=None, status_code=200):
 
 def allowed_file(filename):
     return bool(filename and "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS)
-
-
-def valid_project_url(value, optional=False):
-    """Validate that value is a safe HTTP(S) project or GitHub URL.
-
-    Rejects javascript: URLs, credentials, protocol-relative URLs, and URLs
-    containing whitespace. Empty value is only allowed when optional=True.
-    """
-    if optional and not value:
-        return True
-    if not isinstance(value, str) or len(value) > 2048:
-        return False
-    parsed = urlparse(value)
-    return (
-        parsed.scheme in ("http", "https")
-        and bool(parsed.hostname)
-        and parsed.username is None
-        and parsed.password is None
-        and not any(character.isspace() for character in value)
-    )
-
-
-def parse_project(row):
-    """Convert a database row into the frontend project representation."""
-    try:
-        technologies = json.loads(row.get("technologies") or "[]")
-    except (TypeError, ValueError):
-        technologies = []
-    row["technologies"] = technologies if isinstance(technologies, list) else []
-    row["is_featured"] = bool(row.get("is_featured"))
-    return row
 
 
 def cloudinary_ready():
@@ -204,11 +158,164 @@ def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         provided = request.headers.get("X-Admin-Token", "")
+        # TEMPORARY DIAGNOSTIC — boolean only, no secret values. REMOVE AFTER VERIFICATION.
+        print(
+            f"[diag admin_required] X-Admin-Token present: {bool(provided)}, "
+            f"ADMIN_TOKEN configured: {bool(ADMIN_TOKEN)}, "
+            f"comparison succeeded: {provided == ADMIN_TOKEN}"
+        )
         if not ADMIN_TOKEN or provided != ADMIN_TOKEN:
             return response("error", "Unauthorized. A valid admin token is required.", None, 401)
+
         return f(*args, **kwargs)
 
     return wrapper
+
+
+def valid_project_url(value, optional=False):
+    if optional and not value:
+        return True
+    if not isinstance(value, str) or len(value) > 2048:
+        return False
+    parsed = urlparse(value)
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and not any(character.isspace() for character in value)
+    )
+
+
+def parse_project(row):
+    """Convert database row fields to the frontend project representation."""
+    import json
+
+    try:
+        technologies = json.loads(row.get("technologies") or "[]")
+    except (TypeError, ValueError):
+        technologies = []
+    row["technologies"] = technologies if isinstance(technologies, list) else []
+    row["is_featured"] = bool(row.get("is_featured"))
+    return row
+
+
+@app.route("/api/projects", methods=["GET"])
+@with_db
+def get_projects(connection):
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM portfolio_projects ORDER BY is_featured DESC, id DESC")
+    return response("success", "Projects retrieved", [parse_project(row) for row in cursor.fetchall()])
+
+
+@app.route("/api/projects", methods=["POST"])
+@admin_required
+@with_db
+def create_project(connection):
+    import json
+
+    title = request.form.get("title", "").strip()
+    description = request.form.get("description", "").strip()
+    category = request.form.get("category", "").strip()
+    project_url = request.form.get("project_url", "").strip()
+    github_url = request.form.get("github_url", "").strip()
+    if not title or len(title) > 255:
+        return response("error", "Title is required and must be 255 characters or fewer", None, 400)
+    if not description or len(description) > 5000:
+        return response("error", "Description is required and must be 5000 characters or fewer", None, 400)
+    if category not in PROJECT_CATEGORIES:
+        return response("error", "Invalid project category", None, 400)
+    if not valid_project_url(project_url) or not valid_project_url(github_url, optional=True):
+        return response("error", "Project links must be valid HTTP or HTTPS URLs", None, 400)
+
+    technologies_value = request.form.get("technologies", "[]")
+    try:
+        technologies = json.loads(technologies_value) if isinstance(technologies_value, str) else technologies_value
+    except (TypeError, ValueError):
+        return response("error", "Technologies must be a JSON array", None, 400)
+    if not isinstance(technologies, list) or any(not isinstance(item, str) or len(item) > 100 for item in technologies):
+        return response("error", "Technologies must be a list of strings (100 characters maximum each)", None, 400)
+
+    image_url = None
+    if any(file.filename for file in request.files.values()):
+        image_data, upload_error = handle_image_upload(("image",), folder="portfolio/projects")
+        if upload_error:
+            return response("error", upload_error, None, 400)
+        image_url = image_data["url"] if image_data else None
+    is_featured = request.form.get("is_featured", "false").lower() in ("true", "1", "yes")
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO portfolio_projects (title, description, category, technologies, project_url, github_url, image_url, is_featured) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (title, description, category, json.dumps(technologies), project_url, github_url or None, image_url, is_featured),
+    )
+    return response("success", "Project created successfully", {"id": cursor.lastrowid}, 201)
+
+
+@app.route("/api/projects/<int:project_id>", methods=["PUT"])
+@admin_required
+@with_db
+def update_project(connection, project_id):
+    import json
+
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM portfolio_projects WHERE id=%s", (project_id,))
+    existing = cursor.fetchone()
+    if not existing:
+        return response("error", "Project not found", None, 404)
+
+    def field(name, old):
+        return request.form.get(name, old)
+
+    title = field("title", existing["title"]).strip()
+    description = field("description", existing["description"]).strip()
+    category = field("category", existing["category"]).strip()
+    project_url = field("project_url", existing["project_url"]).strip()
+    github_url = field("github_url", existing.get("github_url") or "").strip()
+    if not title or len(title) > 255:
+        return response("error", "Title is required and must be 255 characters or fewer", None, 400)
+    if not description or len(description) > 5000:
+        return response("error", "Description is required and must be 5000 characters or fewer", None, 400)
+    if category not in PROJECT_CATEGORIES:
+        return response("error", "Invalid project category", None, 400)
+    if not valid_project_url(project_url) or not valid_project_url(github_url, optional=True):
+        return response("error", "Project links must be valid HTTP or HTTPS URLs", None, 400)
+
+    technologies_raw = request.form.get("technologies")
+    if technologies_raw is None:
+        technologies = json.loads(existing.get("technologies") or "[]")
+    else:
+        try:
+            technologies = json.loads(technologies_raw)
+        except (TypeError, ValueError):
+            return response("error", "Technologies must be a JSON array", None, 400)
+    if not isinstance(technologies, list) or any(not isinstance(item, str) or len(item) > 100 for item in technologies):
+        return response("error", "Technologies must be a list of strings (100 characters maximum each)", None, 400)
+
+    image_url = existing.get("image_url")
+    if any(file.filename for file in request.files.values()):
+        image_data, upload_error = handle_image_upload(("image",), folder="portfolio/projects")
+        if upload_error:
+            return response("error", upload_error, None, 400)
+        if image_data:
+            image_url = image_data["url"]
+    is_featured = request.form.get("is_featured", str(bool(existing.get("is_featured")))).lower() in ("true", "1", "yes")
+    cursor = connection.cursor()
+    cursor.execute(
+        "UPDATE portfolio_projects SET title=%s, description=%s, category=%s, technologies=%s, project_url=%s, github_url=%s, image_url=%s, is_featured=%s WHERE id=%s",
+        (title, description, category, json.dumps(technologies), project_url, github_url or None, image_url, is_featured, project_id),
+    )
+    return response("success", "Project updated successfully")
+
+
+@app.route("/api/projects/<int:project_id>", methods=["DELETE"])
+@admin_required
+@with_db
+def delete_project(connection, project_id):
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM portfolio_projects WHERE id=%s", (project_id,))
+    if cursor.rowcount == 0:
+        return response("error", "Project not found", None, 404)
+    return response("success", "Project deleted successfully")
 
 
 @app.route("/api/profile", methods=["GET"])
@@ -428,120 +535,6 @@ def delete_gallery_photo(connection, photo_id):
     return response("success", "Photo deleted successfully")
 
 
-@app.route("/api/projects", methods=["GET"])
-@with_db
-def get_projects(connection):
-    cursor = connection.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM portfolio_projects ORDER BY is_featured DESC, id DESC")
-    return response("success", "Projects retrieved", [parse_project(row) for row in cursor.fetchall()])
-
-
-@app.route("/api/projects", methods=["POST"])
-@admin_required
-@with_db
-def create_project(connection):
-    title = request.form.get("title", "").strip()
-    description = request.form.get("description", "").strip()
-    category = request.form.get("category", "").strip()
-    project_url = request.form.get("project_url", "").strip()
-    github_url = request.form.get("github_url", "").strip()
-    if not title or len(title) > 255:
-        return response("error", "Title is required and must be 255 characters or fewer", None, 400)
-    if not description or len(description) > 5000:
-        return response("error", "Description is required and must be 5000 characters or fewer", None, 400)
-    if category not in PROJECT_CATEGORIES:
-        return response("error", "Invalid project category", None, 400)
-    if not valid_project_url(project_url) or not valid_project_url(github_url, optional=True):
-        return response("error", "Project links must be valid HTTP or HTTPS URLs", None, 400)
-
-    technologies_value = request.form.get("technologies", "[]")
-    try:
-        technologies = json.loads(technologies_value) if isinstance(technologies_value, str) else technologies_value
-    except (TypeError, ValueError):
-        return response("error", "Technologies must be a JSON array", None, 400)
-    if not isinstance(technologies, list) or any(not isinstance(item, str) or len(item) > 100 for item in technologies):
-        return response("error", "Technologies must be a list of strings (100 characters maximum each)", None, 400)
-
-    image_url = None
-    if any(file.filename for file in request.files.values()):
-        image_data, upload_error = handle_image_upload(("image",), folder="portfolio/projects")
-        if upload_error:
-            return response("error", upload_error, None, 400)
-        image_url = image_data["url"] if image_data else None
-    is_featured = request.form.get("is_featured", "false").lower() in ("true", "1", "yes")
-    cursor = connection.cursor()
-    cursor.execute(
-        "INSERT INTO portfolio_projects (title, description, category, technologies, project_url, github_url, image_url, is_featured) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (title, description, category, json.dumps(technologies), project_url, github_url or None, image_url, is_featured),
-    )
-    return response("success", "Project created successfully", {"id": cursor.lastrowid}, 201)
-
-
-@app.route("/api/projects/<int:project_id>", methods=["PUT"])
-@admin_required
-@with_db
-def update_project(connection, project_id):
-    cursor = connection.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM portfolio_projects WHERE id=%s", (project_id,))
-    existing = cursor.fetchone()
-    if not existing:
-        return response("error", "Project not found", None, 404)
-
-    def field(name, old):
-        return request.form.get(name, old)
-
-    title = field("title", existing["title"]).strip()
-    description = field("description", existing["description"]).strip()
-    category = field("category", existing["category"]).strip()
-    project_url = field("project_url", existing["project_url"]).strip()
-    github_url = field("github_url", existing.get("github_url") or "").strip()
-    if not title or len(title) > 255:
-        return response("error", "Title is required and must be 255 characters or fewer", None, 400)
-    if not description or len(description) > 5000:
-        return response("error", "Description is required and must be 5000 characters or fewer", None, 400)
-    if category not in PROJECT_CATEGORIES:
-        return response("error", "Invalid project category", None, 400)
-    if not valid_project_url(project_url) or not valid_project_url(github_url, optional=True):
-        return response("error", "Project links must be valid HTTP or HTTPS URLs", None, 400)
-
-    technologies_raw = request.form.get("technologies")
-    if technologies_raw is None:
-        technologies = json.loads(existing.get("technologies") or "[]")
-    else:
-        try:
-            technologies = json.loads(technologies_raw)
-        except (TypeError, ValueError):
-            return response("error", "Technologies must be a JSON array", None, 400)
-    if not isinstance(technologies, list) or any(not isinstance(item, str) or len(item) > 100 for item in technologies):
-        return response("error", "Technologies must be a list of strings (100 characters maximum each)", None, 400)
-
-    image_url = existing.get("image_url")
-    if any(file.filename for file in request.files.values()):
-        image_data, upload_error = handle_image_upload(("image",), folder="portfolio/projects")
-        if upload_error:
-            return response("error", upload_error, None, 400)
-        if image_data:
-            image_url = image_data["url"]
-    is_featured = request.form.get("is_featured", str(bool(existing.get("is_featured")))).lower() in ("true", "1", "yes")
-    cursor = connection.cursor()
-    cursor.execute(
-        "UPDATE portfolio_projects SET title=%s, description=%s, category=%s, technologies=%s, project_url=%s, github_url=%s, image_url=%s, is_featured=%s WHERE id=%s",
-        (title, description, category, json.dumps(technologies), project_url, github_url or None, image_url, is_featured, project_id),
-    )
-    return response("success", "Project updated successfully")
-
-
-@app.route("/api/projects/<int:project_id>", methods=["DELETE"])
-@admin_required
-@with_db
-def delete_project(connection, project_id):
-    cursor = connection.cursor()
-    cursor.execute("DELETE FROM portfolio_projects WHERE id=%s", (project_id,))
-    if cursor.rowcount == 0:
-        return response("error", "Project not found", None, 404)
-    return response("success", "Project deleted successfully")
-
-
 def share_link_status(row):
     """Calculate the current status of a share link row."""
     if not row.get("is_active"):
@@ -683,9 +676,24 @@ def admin_login():
     """Validate a submitted admin token before the frontend unlocks controls."""
     data = request.get_json(silent=True) or {}
     provided = (data.get("token") or "").strip()
+    # TEMPORARY DIAGNOSTIC — boolean only, no secret values. REMOVE AFTER VERIFICATION.
+    print(f"[diag admin_login] ADMIN_TOKEN configured: {bool(ADMIN_TOKEN)}")
     if ADMIN_TOKEN and provided == ADMIN_TOKEN:
         return response("success", "Authenticated")
+    # TEMPORARY DIAGNOSTIC — boolean only, no secret values. REMOVE AFTER VERIFICATION.
+    print(f"[diag admin_login] token comparison succeeded: {bool(ADMIN_TOKEN) and provided == ADMIN_TOKEN}")
     return response("error", "Invalid admin token", None, 401)
+
+
+# TEMPORARY DIAGNOSTIC — REMOVE AFTER PRODUCTION VERIFICATION.
+# Boolean-only status: never returns or logs secret values.
+@app.route("/api/__diag_admin_env", methods=["GET"])
+def __diag_admin_env():
+    return response(
+        "success",
+        "Admin environment diagnostic",
+        {"admin_token_configured": bool(ADMIN_TOKEN)},
+    )
 
 
 @app.route("/api/health", methods=["GET"])
