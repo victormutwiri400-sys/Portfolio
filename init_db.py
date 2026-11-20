@@ -88,13 +88,32 @@ def create_database_and_tables():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         """)
-        
+
+        # Create portfolio_projects table (My Projects feature)
+        print("Creating 'portfolio_projects' table...")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_projects (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                description TEXT NOT NULL,
+                category VARCHAR(100) NOT NULL,
+                technologies TEXT NOT NULL,
+                project_url VARCHAR(2048) NOT NULL,
+                github_url VARCHAR(2048) NULL,
+                image_url VARCHAR(2048) NULL,
+                is_featured BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_portfolio_projects_featured_id (is_featured, id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
         connection.commit()
         cursor.close()
-        
+
         print("\n✓ Database and tables created successfully!")
         print(f"✓ Database: {DB_NAME}")
-        print("✓ Tables: profile, cv_entries, certificates, gallery_photos")
+        print("✓ Tables: profile, cv_entries, certificates, gallery_photos, portfolio_projects")
         
     except Error as e:
         print(f"✗ Error: {e}")
